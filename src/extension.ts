@@ -90,18 +90,19 @@ function repaint(): void {
  */
 function revealActive(): void {
   const uri = vscode.window.activeTextEditor?.document.uri;
-  const node = uri?.scheme === "file" ? provider.findByPath(uri.fsPath) : undefined;
 
+  // Only react to real file editors. For anything else (no active editor,
+  // terminal/output/settings, diffs, etc.) keep the current highlight, like the
+  // Explorer does. This avoids constantly rebuilding the tree and racing reveals.
+  if (uri?.scheme !== "file") return;
+
+  const node = provider.findByPath(uri.fsPath);
   if (!node) {
-    if (selectedByUs) {
-      selectedByUs = false;
-      idSalt++; // fresh file ids on the next build → the selection is dropped
-      repaint();
-    }
+    // An actual file that isn't one of the changed files: drop the highlight.
+    clearSelection();
     return;
   }
 
-  if (!treeView.visible) return;
   // `explorer.autoReveal` is true | false | "focusNoScroll"; only false disables it.
   const autoReveal = vscode.workspace
     .getConfiguration("explorer")
@@ -109,7 +110,16 @@ function revealActive(): void {
   if (autoReveal === false) return;
 
   selectedByUs = true;
-  void treeView.reveal(node, { select: true, focus: false, expand: true });
+  // Ignore rejections: a rebuild can invalidate an in-flight reveal (benign).
+  treeView.reveal(node, { select: true, focus: false, expand: true }).then(undefined, () => undefined);
+}
+
+/** Drops the auto-reveal selection by rebuilding so the file ids change. */
+function clearSelection(): void {
+  if (!selectedByUs) return;
+  selectedByUs = false;
+  idSalt++; // fresh file ids on the next build → the selection is dropped
+  repaint();
 }
 
 /** Persists (or clears, with null) the last view state for instant repaint. */
