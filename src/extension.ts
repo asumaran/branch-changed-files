@@ -38,6 +38,11 @@ let viewMode: ViewMode = "tree";
 let globalState: vscode.Memento;
 let workspaceState: vscode.Memento;
 
+/** Data of the last painted tree, kept so we can rebuild it synchronously. */
+let lastBuild: { repoRoot: string; mergeBaseSha: string; files: ChangedFile[] } | null = null;
+/** Whether the current selection was set by us (auto-reveal), so we know to clear it. */
+let selectedByUs = false;
+
 const VIEW_MODE_KEY = "aschanged.viewMode";
 const CACHE_KEY = "aschanged.snapshot";
 
@@ -61,29 +66,47 @@ function compactFoldersEnabled(): boolean {
   return vscode.workspace.getConfiguration("explorer").get<boolean>("compactFolders", true);
 }
 
+/** Repaints the view from the last build, giving files fresh identities. */
+function repaint(): void {
+  if (!lastBuild) {
+    provider.setRoots([]);
+    return;
+  }
+  provider.setRoots(
+    buildNodes(lastBuild.files, lastBuild.repoRoot, lastBuild.mergeBaseSha, viewMode, compactFoldersEnabled())
+  );
+}
+
 /**
- * Highlights the active editor's file in the view so it's easy to locate,
- * mirroring the Explorer's auto-reveal. The highlight is a file decoration we
- * control (the TreeView API can't clear a row selection), so it appears on the
- * active file and disappears when the active file isn't one of the changed
- * files. When present and the view is open, the file is also scrolled into view
- * (respecting `explorer.autoReveal`); focus:false keeps the cursor in the editor.
+ * Highlights the active editor's file in the view by selecting its row, so it
+ * looks exactly like the Explorer's auto-reveal (full-row background, not just
+ * colored text). When the active file isn't one of the changed files the
+ * highlight disappears: the TreeView API can't clear a selection, so we rebuild
+ * the tree to drop it (folders keep their id, hence their expanded state; files
+ * get fresh identities, so the selection is lost). focus:false keeps the cursor
+ * in the editor; the scroll respects `explorer.autoReveal`.
  */
 function revealActive(): void {
   const uri = vscode.window.activeTextEditor?.document.uri;
   const node = uri?.scheme === "file" ? provider.findByPath(uri.fsPath) : undefined;
 
-  // Accent the active file, or clear the accent if it isn't in the view.
-  decorations.setActive(node ? uri!.fsPath : undefined);
-  if (!node || !treeView.visible) return;
+  if (!node) {
+    if (selectedByUs) {
+      selectedByUs = false;
+      repaint();
+    }
+    return;
+  }
 
+  if (!treeView.visible) return;
   // `explorer.autoReveal` is true | false | "focusNoScroll"; only false disables it.
   const autoReveal = vscode.workspace
     .getConfiguration("explorer")
     .get<boolean | string>("autoReveal", true);
   if (autoReveal === false) return;
 
-  void treeView.reveal(node, { select: false, focus: false, expand: true });
+  selectedByUs = true;
+  void treeView.reveal(node, { select: true, focus: false, expand: true });
 }
 
 /** Persists (or clears, with null) the last view state for instant repaint. */
@@ -103,6 +126,7 @@ function seedFromCache(): void {
     snap.overridden ? " (manual)" : ""
   }`;
   decorations.update(snap.repoRoot, snap.files);
+  lastBuild = { repoRoot: snap.repoRoot, mergeBaseSha: snap.mergeBaseSha, files: snap.files };
   provider.setRoots(
     buildNodes(snap.files, snap.repoRoot, snap.mergeBaseSha, viewMode, compactFoldersEnabled())
   );
@@ -219,6 +243,10 @@ async function setViewMode(mode: ViewMode): Promise<void> {
 
 /** Recomputes the whole state and repaints the view. */
 async function refresh(): Promise<void> {
+  // Cleared here so every early return below leaves nothing to repaint; the
+  // success path sets it again before painting.
+  lastBuild = null;
+
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
     current = null;
@@ -276,8 +304,10 @@ async function refresh(): Promise<void> {
   treeView.message = visible.length === 0 ? "No files changed relative to the base." : undefined;
 
   decorations.update(repoRoot, visible);
+  lastBuild = { repoRoot, mergeBaseSha: mb, files: visible };
   provider.setRoots(buildNodes(visible, repoRoot, mb, viewMode, compactFoldersEnabled()));
-  // Re-select the active file: rebuilding the tree dropped the prior selection.
+  // The rebuild dropped any prior selection; re-select the active file (if any).
+  selectedByUs = false;
   revealActive();
 
   // Persist for the next reactivation's instant repaint (only the populated state).

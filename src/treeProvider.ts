@@ -50,6 +50,9 @@ export class ChangedFolderItem extends vscode.TreeItem {
     label: string
   ) {
     super(label, vscode.TreeItemCollapsibleState.Expanded);
+    // Stable id so the expanded/collapsed state survives a tree rebuild (we
+    // rebuild to clear the selection; files get no id so the selection drops).
+    this.id = `dir:${relPath}`;
     this.resourceUri = vscode.Uri.file(path.join(repoRoot, relPath));
     this.iconPath = vscode.ThemeIcon.Folder;
     this.contextValue = "changedFolder";
@@ -242,18 +245,6 @@ export class StatusDecorationProvider implements vscode.FileDecorationProvider {
   readonly onDidChangeFileDecorations = this._onDidChange.event;
 
   private kindByPath = new Map<string, ChangeKind>();
-  /** fsPath of the active editor's file, accented so it's easy to spot. */
-  private activePath: string | undefined;
-
-  /** Accents one file as the active editor's (or clears it with undefined). */
-  setActive(fsPath: string | undefined): void {
-    if (this.activePath === fsPath) return;
-    const changed: vscode.Uri[] = [];
-    if (this.activePath) changed.push(vscode.Uri.file(this.activePath));
-    if (fsPath) changed.push(vscode.Uri.file(fsPath));
-    this.activePath = fsPath;
-    this._onDidChange.fire(changed);
-  }
 
   update(repoRoot: string, files: ChangedFile[]): void {
     const next = new Map<string, ChangeKind>();
@@ -275,19 +266,6 @@ export class StatusDecorationProvider implements vscode.FileDecorationProvider {
 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
     const kind = this.kindByPath.get(uri.fsPath);
-
-    if (uri.fsPath === this.activePath) {
-      // The active editor's file: accent it so it's easy to locate. Keep the
-      // status letter (M/A/D…) if it has one; the accent color stands in for
-      // the git color while the file is active.
-      const badge = kind ? KIND_BADGE[kind] : undefined;
-      return {
-        badge: badge?.letter,
-        tooltip: badge ? `${badge.tooltip} · Active file` : "Active file",
-        color: new vscode.ThemeColor("list.highlightForeground"),
-      };
-    }
-
     if (!kind) return undefined;
     const badge = KIND_BADGE[kind];
     return {
