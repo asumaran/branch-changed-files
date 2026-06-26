@@ -7,6 +7,9 @@ export type ViewMode = "list" | "tree";
 
 /** View node: a changed file. */
 export class ChangedFileItem extends vscode.TreeItem {
+  /** Set while building the tree so the view can reveal this node. */
+  parent?: ChangedFolderItem;
+
   constructor(
     public readonly file: ChangedFile,
     public readonly repoRoot: string,
@@ -36,6 +39,8 @@ export class ChangedFileItem extends vscode.TreeItem {
 /** View node: a folder grouping changed files (tree mode). */
 export class ChangedFolderItem extends vscode.TreeItem {
   public children: TreeNode[] = [];
+  /** Set while building the tree so the view can reveal nested nodes. */
+  parent?: ChangedFolderItem;
 
   constructor(
     /** Folder path relative to the repo root (POSIX). */
@@ -58,9 +63,13 @@ export class ChangedFilesProvider implements vscode.TreeDataProvider<TreeNode> {
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
   private roots: TreeNode[] = [];
+  /** fsPath → file node, so the view can reveal the active editor's file. */
+  private byPath = new Map<string, ChangedFileItem>();
 
   setRoots(roots: TreeNode[]): void {
     this.roots = roots;
+    this.byPath = new Map();
+    index(roots, this.byPath);
     this._onDidChangeTreeData.fire();
   }
 
@@ -72,6 +81,27 @@ export class ChangedFilesProvider implements vscode.TreeDataProvider<TreeNode> {
     if (!element) return this.roots;
     if (element instanceof ChangedFolderItem) return element.children;
     return [];
+  }
+
+  /** Required for treeView.reveal() to walk up to the root. */
+  getParent(element: TreeNode): TreeNode | undefined {
+    return element.parent;
+  }
+
+  /** The file node for a given absolute path, or undefined if not in the view. */
+  findByPath(fsPath: string): ChangedFileItem | undefined {
+    return this.byPath.get(fsPath);
+  }
+}
+
+/** Walks the tree filling a fsPath → file node index. */
+function index(nodes: TreeNode[], into: Map<string, ChangedFileItem>): void {
+  for (const node of nodes) {
+    if (node instanceof ChangedFolderItem) {
+      index(node.children, into);
+    } else if (node.resourceUri) {
+      into.set(node.resourceUri.fsPath, node);
+    }
   }
 }
 
@@ -115,7 +145,7 @@ export function buildNodes(
     dir.files.push(f);
   }
 
-  return toNodes(root, repoRoot, mergeBaseSha, compactFolders);
+  return toNodes(root, repoRoot, mergeBaseSha, compactFolders, undefined);
 }
 
 /** Intermediate structure for building the folder tree. */
@@ -130,15 +160,20 @@ function toNodes(
   dir: DirNode,
   repoRoot: string,
   mergeBaseSha: string,
-  compact: boolean
+  compact: boolean,
+  parent: ChangedFolderItem | undefined
 ): TreeNode[] {
   const folders = [...dir.dirs.values()]
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map((sub) => toFolder(sub, repoRoot, mergeBaseSha, compact));
+    .map((sub) => toFolder(sub, repoRoot, mergeBaseSha, compact, parent));
 
   const fileItems = dir.files
     .sort((a, b) => baseName(a.relPath).localeCompare(baseName(b.relPath)))
-    .map((f) => new ChangedFileItem(f, repoRoot, mergeBaseSha, baseName(f.relPath)));
+    .map((f) => {
+      const item = new ChangedFileItem(f, repoRoot, mergeBaseSha, baseName(f.relPath));
+      item.parent = parent;
+      return item;
+    });
 
   // Folders first, then files (like the Explorer).
   return [...folders, ...fileItems];
@@ -149,7 +184,8 @@ function toFolder(
   dir: DirNode,
   repoRoot: string,
   mergeBaseSha: string,
-  compact: boolean
+  compact: boolean,
+  parent: ChangedFolderItem | undefined
 ): ChangedFolderItem {
   let label = dir.name;
   let cur = dir;
@@ -162,7 +198,8 @@ function toFolder(
     }
   }
   const folder = new ChangedFolderItem(cur.relPath, repoRoot, label);
-  folder.children = toNodes(cur, repoRoot, mergeBaseSha, compact);
+  folder.parent = parent;
+  folder.children = toNodes(cur, repoRoot, mergeBaseSha, compact, folder);
   return folder;
 }
 
@@ -205,6 +242,18 @@ export class StatusDecorationProvider implements vscode.FileDecorationProvider {
   readonly onDidChangeFileDecorations = this._onDidChange.event;
 
   private kindByPath = new Map<string, ChangeKind>();
+  /** fsPath of the active editor's file, accented so it's easy to spot. */
+  private activePath: string | undefined;
+
+  /** Accents one file as the active editor's (or clears it with undefined). */
+  setActive(fsPath: string | undefined): void {
+    if (this.activePath === fsPath) return;
+    const changed: vscode.Uri[] = [];
+    if (this.activePath) changed.push(vscode.Uri.file(this.activePath));
+    if (fsPath) changed.push(vscode.Uri.file(fsPath));
+    this.activePath = fsPath;
+    this._onDidChange.fire(changed);
+  }
 
   update(repoRoot: string, files: ChangedFile[]): void {
     const next = new Map<string, ChangeKind>();
@@ -226,6 +275,19 @@ export class StatusDecorationProvider implements vscode.FileDecorationProvider {
 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
     const kind = this.kindByPath.get(uri.fsPath);
+
+    if (uri.fsPath === this.activePath) {
+      // The active editor's file: accent it so it's easy to locate. Keep the
+      // status letter (M/A/D…) if it has one; the accent color stands in for
+      // the git color while the file is active.
+      const badge = kind ? KIND_BADGE[kind] : undefined;
+      return {
+        badge: badge?.letter,
+        tooltip: badge ? `${badge.tooltip} · Active file` : "Active file",
+        color: new vscode.ThemeColor("list.highlightForeground"),
+      };
+    }
+
     if (!kind) return undefined;
     const badge = KIND_BADGE[kind];
     return {

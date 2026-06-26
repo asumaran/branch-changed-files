@@ -61,6 +61,31 @@ function compactFoldersEnabled(): boolean {
   return vscode.workspace.getConfiguration("explorer").get<boolean>("compactFolders", true);
 }
 
+/**
+ * Highlights the active editor's file in the view so it's easy to locate,
+ * mirroring the Explorer's auto-reveal. The highlight is a file decoration we
+ * control (the TreeView API can't clear a row selection), so it appears on the
+ * active file and disappears when the active file isn't one of the changed
+ * files. When present and the view is open, the file is also scrolled into view
+ * (respecting `explorer.autoReveal`); focus:false keeps the cursor in the editor.
+ */
+function revealActive(): void {
+  const uri = vscode.window.activeTextEditor?.document.uri;
+  const node = uri?.scheme === "file" ? provider.findByPath(uri.fsPath) : undefined;
+
+  // Accent the active file, or clear the accent if it isn't in the view.
+  decorations.setActive(node ? uri!.fsPath : undefined);
+  if (!node || !treeView.visible) return;
+
+  // `explorer.autoReveal` is true | false | "focusNoScroll"; only false disables it.
+  const autoReveal = vscode.workspace
+    .getConfiguration("explorer")
+    .get<boolean | string>("autoReveal", true);
+  if (autoReveal === false) return;
+
+  void treeView.reveal(node, { select: false, focus: false, expand: true });
+}
+
 /** Persists (or clears, with null) the last view state for instant repaint. */
 function saveSnapshot(snap: Snapshot | null): void {
   void workspaceState.update(CACHE_KEY, snap ?? undefined);
@@ -106,6 +131,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Paint last session's files right away, then refresh reconciles in background.
   seedFromCache();
+  revealActive();
 
   context.subscriptions.push(
     treeView,
@@ -122,6 +148,14 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("aschanged.viewAsTree", () => setViewMode("tree")),
     vscode.commands.registerCommand("aschanged.viewAsList", () => setViewMode("list")),
     vscode.commands.registerCommand("aschanged.fetchBase", () => fetchBaseCommand())
+  );
+
+  // Keep the active editor's file highlighted in the view so it's easy to locate.
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() => revealActive()),
+    treeView.onDidChangeVisibility((e) => {
+      if (e.visible) revealActive();
+    })
   );
 
   // Reactive refreshes.
@@ -243,6 +277,8 @@ async function refresh(): Promise<void> {
 
   decorations.update(repoRoot, visible);
   provider.setRoots(buildNodes(visible, repoRoot, mb, viewMode, compactFoldersEnabled()));
+  // Re-select the active file: rebuilding the tree dropped the prior selection.
+  revealActive();
 
   // Persist for the next reactivation's instant repaint (only the populated state).
   saveSnapshot(
