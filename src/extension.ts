@@ -42,6 +42,8 @@ let workspaceState: vscode.Memento;
 let lastBuild: { repoRoot: string; mergeBaseSha: string; files: ChangedFile[] } | null = null;
 /** Whether the current selection was set by us (auto-reveal), so we know to clear it. */
 let selectedByUs = false;
+/** Bumped to give file nodes fresh ids, which drops the active-file selection. */
+let idSalt = 0;
 
 const VIEW_MODE_KEY = "aschanged.viewMode";
 const CACHE_KEY = "aschanged.snapshot";
@@ -73,7 +75,7 @@ function repaint(): void {
     return;
   }
   provider.setRoots(
-    buildNodes(lastBuild.files, lastBuild.repoRoot, lastBuild.mergeBaseSha, viewMode, compactFoldersEnabled())
+    buildNodes(lastBuild.files, lastBuild.repoRoot, lastBuild.mergeBaseSha, viewMode, compactFoldersEnabled(), idSalt)
   );
 }
 
@@ -93,6 +95,7 @@ function revealActive(): void {
   if (!node) {
     if (selectedByUs) {
       selectedByUs = false;
+      idSalt++; // fresh file ids on the next build → the selection is dropped
       repaint();
     }
     return;
@@ -128,7 +131,7 @@ function seedFromCache(): void {
   decorations.update(snap.repoRoot, snap.files);
   lastBuild = { repoRoot: snap.repoRoot, mergeBaseSha: snap.mergeBaseSha, files: snap.files };
   provider.setRoots(
-    buildNodes(snap.files, snap.repoRoot, snap.mergeBaseSha, viewMode, compactFoldersEnabled())
+    buildNodes(snap.files, snap.repoRoot, snap.mergeBaseSha, viewMode, compactFoldersEnabled(), idSalt)
   );
 }
 
@@ -305,7 +308,7 @@ async function refresh(): Promise<void> {
 
   decorations.update(repoRoot, visible);
   lastBuild = { repoRoot, mergeBaseSha: mb, files: visible };
-  provider.setRoots(buildNodes(visible, repoRoot, mb, viewMode, compactFoldersEnabled()));
+  provider.setRoots(buildNodes(visible, repoRoot, mb, viewMode, compactFoldersEnabled(), idSalt));
   // The rebuild dropped any prior selection; re-select the active file (if any).
   selectedByUs = false;
   revealActive();

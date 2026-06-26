@@ -124,10 +124,21 @@ export function buildNodes(
   repoRoot: string,
   mergeBaseSha: string,
   mode: ViewMode,
-  compactFolders: boolean
+  compactFolders: boolean,
+  /**
+   * Salt mixed into each file node's id. Folders keep a stable id (so their
+   * expanded state survives a rebuild); files carry the salt so bumping it gives
+   * them fresh ids, which is how the view drops the active-file selection (the
+   * TreeView API can't clear a selection directly).
+   */
+  idSalt: number
 ): TreeNode[] {
   if (mode === "list") {
-    return files.map((f) => new ChangedFileItem(f, repoRoot, mergeBaseSha));
+    return files.map((f) => {
+      const item = new ChangedFileItem(f, repoRoot, mergeBaseSha);
+      item.id = fileId(idSalt, f.relPath);
+      return item;
+    });
   }
 
   const root = new DirNode("", "");
@@ -148,7 +159,12 @@ export function buildNodes(
     dir.files.push(f);
   }
 
-  return toNodes(root, repoRoot, mergeBaseSha, compactFolders, undefined);
+  return toNodes(root, repoRoot, mergeBaseSha, compactFolders, undefined, idSalt);
+}
+
+/** A file node's id: salted so a bump produces a fresh id (clears selection). */
+function fileId(idSalt: number, relPath: string): string {
+  return `f:${idSalt}:${relPath}`;
 }
 
 /** Intermediate structure for building the folder tree. */
@@ -164,16 +180,18 @@ function toNodes(
   repoRoot: string,
   mergeBaseSha: string,
   compact: boolean,
-  parent: ChangedFolderItem | undefined
+  parent: ChangedFolderItem | undefined,
+  idSalt: number
 ): TreeNode[] {
   const folders = [...dir.dirs.values()]
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map((sub) => toFolder(sub, repoRoot, mergeBaseSha, compact, parent));
+    .map((sub) => toFolder(sub, repoRoot, mergeBaseSha, compact, parent, idSalt));
 
   const fileItems = dir.files
     .sort((a, b) => baseName(a.relPath).localeCompare(baseName(b.relPath)))
     .map((f) => {
       const item = new ChangedFileItem(f, repoRoot, mergeBaseSha, baseName(f.relPath));
+      item.id = fileId(idSalt, f.relPath);
       item.parent = parent;
       return item;
     });
@@ -188,7 +206,8 @@ function toFolder(
   repoRoot: string,
   mergeBaseSha: string,
   compact: boolean,
-  parent: ChangedFolderItem | undefined
+  parent: ChangedFolderItem | undefined,
+  idSalt: number
 ): ChangedFolderItem {
   let label = dir.name;
   let cur = dir;
@@ -202,7 +221,7 @@ function toFolder(
   }
   const folder = new ChangedFolderItem(cur.relPath, repoRoot, label);
   folder.parent = parent;
-  folder.children = toNodes(cur, repoRoot, mergeBaseSha, compact, folder);
+  folder.children = toNodes(cur, repoRoot, mergeBaseSha, compact, folder, idSalt);
   return folder;
 }
 
